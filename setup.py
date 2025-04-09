@@ -7,7 +7,7 @@ LIB_NAME = 'mangagraph'
 
 WORK_DIR = pathlib.Path(__file__).parent
 
-VERSION = '0.0.3.post5'
+VERSION = '0.0.3.post6'
 
 setup(
     name=LIB_NAME,
