@@ -156,7 +156,7 @@ class Mangagraph():
 
     async def search_manga(
             self, query: str, limit: int = 5
-        ) -> SearchData:
+        ) -> list[SearchData]:
         url = f"{API_BASE_URL}manga"
         params = {
             "fields[]": ["rate_avg", "rate", "releaseDate"],
