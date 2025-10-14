@@ -6,12 +6,17 @@ import asyncio
 async def test():
     try:
         parser = Mangagraph()
-        toc_url, mirror_toc_url = await parser.process_chapter(
+        results = await parser.process_chapters(
             'https://mangalib.me/ru/manga/7965--chainsaw-man',
-            chapter_num=90
+            chapter_nums=[90, 91, 92]
         )
-        print(f"Table of Contents: {toc_url}")
-        print(f"Mirror: {mirror_toc_url}")
+
+        print("Parsed chapters:\n")
+        for num, (toc, mirror) in results.items():
+            print(f"📖 Chapter {num}")
+            print(f"   TOC: {toc}")
+            print(f"   Mirror: {mirror}\n")
+
     except MangagraphError as e:
         print(f"Parser error: {e}")
 

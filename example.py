@@ -22,6 +22,18 @@ async def main():
         )
         print(f'Бензочел, глава номер {chapter_num}: {url} | {mirror_url}')
 
+        # Парсинг нескольких глав сразу
+        results = await mgraph.process_chapters(
+            'https://mangalib.me/ru/manga/7965--chainsaw-man',
+            chapter_nums=[90, 91, 92]
+        )
+
+        print("Главы:\n")
+        for num, (toc, mirror) in results.items():
+            print(f"📖 Глава №{num}")
+            print(f"   TOC: {toc}")
+            print(f"   Mirror: {mirror}\n")
+
         # Парсинг манги и загрузка телеграф
         toc_url, mirror_toc_url = await mgraph.process_manga('https://mangalib.me/ru/manga/706--onepunchman')
 
