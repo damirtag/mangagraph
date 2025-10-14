@@ -4,7 +4,7 @@ import pathlib
 
 LIB_NAME = 'mangagraph'
 WORK_DIR = pathlib.Path(__file__).parent
-VERSION = '0.0.3.post6'
+VERSION = '0.1.0'
 
 try:
     long_description = (WORK_DIR / "readme.md").read_text("utf-8")
