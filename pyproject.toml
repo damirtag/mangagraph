@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mangagraph"
-version = "0.2.0"
+version = "0.2.0.post1"
 description = "Async manga parser-converter from mangalib to telegraph pages"
 readme = "readme.md"
 license = { text = "MIT" }
