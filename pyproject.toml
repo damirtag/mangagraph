@@ -15,7 +15,7 @@ requires-python = ">=3.9"
 dependencies = [
     "aiohttp>=3.8.0",
     "sqlalchemy>=1.4.0",
-    "telegraph>=2.2.0",
+    "telegraph[aio]>=2.2.0",
 ]
 keywords = [
     "mangalib",
