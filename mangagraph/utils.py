@@ -1,57 +1,76 @@
 
 import re, hashlib
+from typing         import Union
 from urllib.parse   import urlparse
+
 from .exceptions    import InvalidURLException
+from .constants     import CHAPTERS_PER_MINUTE
+
+# Поддерживаемые форматы:
+#   https://mangalib.me/ru/manga/7965--chainsaw-man
+#   https://mangalib.me/ru/7965--chainsaw-man/read/v1/c1
+#   https://mangalib.me/manga/7965--chainsaw-man (старый формат)
+SLUG_PATTERN = re.compile(r'^/(?:ru/)?(?:manga/)?(\d+--[\w\-]+)')
 
 
-class MangaLibUrl:
-    MANGALIB_URL_PATTERNS = [
-        r"^https://mangalib\.me/ru/manga/[\w\-]+(\?.+)?$",
-        r"^https://mangalib\.me/ru/\d+--[\w\-]+/read/v\d+/c\d+(\?.+)?$"
-    ]
-    
-    def __init__(self, url: str):
-        self.url = url
-        self._validate_url()
+def extract_slug(url: Union[str, object]) -> str:
+    url = str(url)
+    parsed = urlparse(url)
 
-    def _validate_url(self):
-        parsed_url = urlparse(self.url)
-        if not (parsed_url.scheme == "https" and parsed_url.netloc == "mangalib.me"):
-            raise ValueError("Неверный адресс. Только 'https://mangalib.me' доступен.")
-        
-        if not any(re.compile(pattern).match(self.url) for pattern in self.MANGALIB_URL_PATTERNS):
-            raise ValueError(
-                "Неверный URL. Ссылка должна быть одного из типов:\n"
-                "- 'https://mangalib.me/ru/manga/{slug_url}'\n"
-                "- 'https://mangalib.me/ru/{slug_url}/read/v{volume}/c{chapter}'"
-            )
+    if parsed.scheme != 'https' or parsed.netloc != 'mangalib.me':
+        raise InvalidURLException(url, "Только 'https://mangalib.me' поддерживается.")
 
-    def __str__(self):
-        return self.url
+    match = SLUG_PATTERN.match(parsed.path)
+    if not match:
+        raise InvalidURLException(
+            url,
+            "Ссылка должна быть одного из типов:\n"
+            "- 'https://mangalib.me/ru/manga/{slug_url}'\n"
+            "- 'https://mangalib.me/ru/{slug_url}/read/v{volume}/c{chapter}'"
+        )
+    return match.group(1)
 
-def estimate_remaining_time(remaining_chapters: int, chapters_per_minute: int = 12) -> str:
+
+def normalize_chapter_number(value: Union[int, float, str, None]) -> str:
+    """
+    Приводит номер главы/тома к каноничной строке:
+    10 -> '10', 10.0 -> '10', '10.50' -> '10.5', 'extra' -> 'extra'.
+
+    MangaLib отдает номера строками, и главы вида '10.5' — обычное дело,
+    поэтому хранить и сравнивать их можно только как строки.
+    """
+    if value is None:
+        return ''
+    text = str(value).strip()
+    try:
+        number = float(text)
+    except ValueError:
+        return text
+    if number.is_integer():
+        return str(int(number))
+    return repr(number)
+
+
+def estimate_remaining_time(
+    remaining_chapters: int,
+    chapters_per_minute: int = CHAPTERS_PER_MINUTE
+) -> str:
     estimated_minutes = (remaining_chapters / chapters_per_minute) * 1.1
-    
+
     if estimated_minutes < 1:
         return "меньше минуты"
-        
+
     hours = int(estimated_minutes // 60)
     minutes = int(estimated_minutes % 60)
-    
+
     if hours > 0:
         return f"{hours} ч {minutes} мин"
     return f"{minutes} мин"
 
-def extract_slug(url: str) -> str:
-    pattern = r'/manga/(\d+--[^?]+)'
-    match = re.search(pattern, url)
-    if match:
-        return match.group(1)
-    raise InvalidURLException(url, "Invalid MangaLib URL format.")
 
 def sanitize_db_name(db_name: str) -> str:
     clean_name = re.sub(r'[^\w\-.]', '_', db_name)
-    
+
     if len(clean_name) < 3 or clean_name == '_' * len(clean_name):
         hash_suffix = hashlib.md5(db_name.encode()).hexdigest()[:8]
         safe_name = f"{hash_suffix}.db"
