@@ -1,78 +1,48 @@
-"""
-Author: https://github.com/damirtag | https://t.me/damirtag
-GH Repo: https://github.com/damirtag/mangagraph
-
-MIT License
-
-Copyright (c) 2025 Tagilbayev Damir
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-"""
-
 import asyncio
-import aiohttp
 import logging
 
-from typing         import List, Dict, Any, Tuple, Optional, Union
+from typing         import List, Dict, Tuple, Optional, Union
 
 from sqlalchemy     import create_engine
 from sqlalchemy.orm import sessionmaker, Session
 
 from .models        import Base, Chapter, TocURL
 from .schemas       import SearchData
-from .exceptions    import (
-    MangagraphError,
-    RequestFailedException
-)
+from .client        import MangaLibClient, ChapterNumber
+from .exceptions    import MangagraphError
 from .utils         import (
-    MangaLibUrl, 
-    estimate_remaining_time, 
+    estimate_remaining_time,
     extract_slug,
+    normalize_chapter_number,
     sanitize_db_name
 )
-from .constants     import (
-    TELEGRAPH_CREDS,
-    MAX_CONCURRENT,
-    API_BASE_URL,
-    BASE_IMG_URL,
-    HEADERS
-)
+from .constants     import TELEGRAPH_CREDS
 
 from telegraph.aio import Telegraph
 from telegraph.exceptions import RetryAfterError
 
+
 class Mangagraph():
     """
+    Оркестратор: MangaLib API -> Telegraph страницы -> SQLite.
+
+    Запросы к API живут в :class:`MangaLibClient` и доступны напрямую
+    через ``self.client``.
+
     Автор: https://github.com/damirtag
 
     Репозитории: https://github.com/damirTAG/mangagraph
+
+    Args:
+        token: Персональный Bearer-токен MangaLib (нужен для поиска).
+            Если не передан — берется из MANGALIB_TOKEN (env или .env).
     """
-    def __init__(self):
+    def __init__(self, token: Optional[str] = None):
         self.logger     = self._setup_logger()
+        self.client     = MangaLibClient(token)
         self.telegraph  = Telegraph()
-        self.semaphore  = asyncio.Semaphore(MAX_CONCURRENT)
 
-        self.processed_count    = 0
-        self.total_chapters     = 0
-        self.flood_wait_count   = 0
-
-        self.headers = HEADERS
+        self.flood_wait_count = 0
 
     def _setup_logger(self):
         logger = logging.getLogger('mangagraph')
@@ -82,163 +52,100 @@ class Mangagraph():
         if not logger.handlers:
             logger.addHandler(handler)
         logger.setLevel(logging.INFO)
+        logger.propagate = False
         return logger
 
     def _setup_db(self, db_name: str) -> Session:
+        db_name = sanitize_db_name(db_name)
+        self.logger.info(f'Имя БД: {db_name}')
+
+        engine = create_engine(f'sqlite:///{db_name}')
+        Base.metadata.create_all(engine)
+        self._migrate_db(engine)
+
+        SessionLocal = sessionmaker(bind=engine)
+        return SessionLocal()
+
+    def _migrate_db(self, engine):
+        # БД, созданные версиями < 0.2.0, не имеют колонок path/access_token
+        with engine.begin() as conn:
+            columns = {
+                row[1] for row in conn.exec_driver_sql("PRAGMA table_info('ToC_url')")
+            }
+            for column in ('path', 'access_token'):
+                if columns and column not in columns:
+                    conn.exec_driver_sql(f"ALTER TABLE ToC_url ADD COLUMN {column} TEXT")
+
+    async def _ensure_telegraph_account(self):
+        if not self.telegraph.get_access_token():
+            await self.telegraph.create_account(**TELEGRAPH_CREDS)
+
+    async def search_manga(self, query: str, limit: int = 5) -> List[SearchData]:
+        """Поиск манги. Тонкая обертка над ``self.client.search``."""
         try:
-            db_name = sanitize_db_name(db_name)
-            self.logger.info(f'Имя БД: {db_name}')
-
-            engine = create_engine(f'sqlite:///{db_name}')
-            Base.metadata.create_all(engine)
-
-            SessionLocal = sessionmaker(bind=engine)
-
-            return SessionLocal()
-        except Exception as e:
-            self.logger.error(f'Error trying to setup database: {e}')
-            return None
-
-    async def _make_request(
-            self, session: aiohttp.ClientSession, url: str, params: Dict = None
-        ) -> Dict:
-        async with self.semaphore:
-            for attempt in range(3):
-                try:
-                    async with session.get(url, params=params, headers=self.headers) as response:
-                        response.raise_for_status()
-                        return await response.json()
-                except Exception as e:
-                    if attempt == 2:
-                        raise RequestFailedException(url, str(e))
-                    await asyncio.sleep(2 ** attempt)
-
-    async def _get_manga_name(self, session: aiohttp.ClientSession, slug: str) -> tuple[str, str]:
-        url = f"{API_BASE_URL}manga/{slug}"
-        data: dict = await self._make_request(session, url)
-        
-        manga_name = data.get('data', {}).get('rus_name', 1)
-        if manga_name == 1:
-            manga_name = data.get('data', {}).get('name', 'Unknown')
-        
-        return manga_name
-
-    async def get_chapters_info(
-            self, session: aiohttp.ClientSession, slug: str, chapter_num: Optional[float] = None
-        ) -> List[Dict[str, Any]]:
-        url = f"{API_BASE_URL}manga/{slug}/chapters"
-        data = await self._make_request(session, url)
-
-        if not data or 'data' not in data or not isinstance(data['data'], list):
-            self.logger.error(f"Похоже, главы в манге были удалены: {slug}")
-            return []  # Некоторые манги могут быть с пустыми главами 
-            # из-за удаления по требованиям copyright
-
-        chapters = data['data']
-
-        # Фильтруем по номеру главы, если параметр передан
-        if chapter_num is not None:
-            chapters = [chapter for chapter in chapters if float(chapter.get("number", 0)) == chapter_num]
-
-        return chapters
-
-    async def get_chapter_pages(
-        self, 
-        session: aiohttp.ClientSession, 
-        slug: str, 
-        volume: int, 
-        chapter: int
-    ) -> List[str]:
-        url = f"{API_BASE_URL}manga/{slug}/chapter"
-        params = {'number': chapter, 'volume': volume}
-        data = await self._make_request(session, url, params)
-        return [f"{BASE_IMG_URL}{page['url']}" for page in data['data']['pages']]
-
-    async def search_manga(
-            self, query: str, limit: int = 5
-        ) -> list[SearchData]:
-        url = f"{API_BASE_URL}manga"
-        params = {
-            "fields[]": ["rate_avg", "rate", "releaseDate"],
-            "q": query,
-            "site_id[]": [1]
-        }
-
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, params=params, headers=self.headers) as response:
-                    response.raise_for_status()
-                    data = await response.json()
-                    
-                    results = []
-                    for manga_data in data.get('data', [])[:limit]:
-                        search_data = SearchData.de_json(manga_data)
-                        results.append(search_data)
-                    
-                    return results
-        except aiohttp.ClientError as e:
-            print(f"Error during search request: {e}")
+            async with self.client:
+                return await self.client.search(query, limit)
+        except MangagraphError as e:
+            self.logger.error(f"Ошибка поиска: {e}")
             return []
-        except Exception as e:
-            print(f"Unexpected error during search: {e}")
-            return []
+
+    async def _telegraph_request(self, method, retries: int = 3, **kwargs):
+        """Вызов Telegraph API с ожиданием при flood wait."""
+        for attempt in range(retries):
+            try:
+                return await method(**kwargs)
+            except RetryAfterError as e:
+                self.flood_wait_count += 1
+                wait_time = max(getattr(e, 'retry_after', 0) or 0, 5)
+                self.logger.info(
+                    f'Flood wait #{self.flood_wait_count}, '
+                    f'ждём {wait_time} сек. (попытка {attempt + 1}/{retries})'
+                )
+                await asyncio.sleep(wait_time)
+        raise MangagraphError(
+            f'Telegraph flood wait не прошёл за {retries} попыток'
+        )
 
     async def _create_telegraph_page(
-            self, 
-            title: str, 
-            image_urls: List[str],
-            retry_count: int = 3
+            self,
+            title: str,
+            image_urls: List[str]
         ) -> Tuple[str, str]:
         html_content = "".join(f'<img src="{url}"/>\n' for url in image_urls)
-        
-        for attempt in range(retry_count):
-            try:
-                response = await self.telegraph.create_page(
-                    title=title,
-                    html_content=html_content,
-                    author_name='Generated by mangagraph',
-                    author_url='https://github.com/damirTAG/mangagraph'
-                )
-                
-                return (
-                    f"https://telegra.ph/{response['path']}", 
-                    f"https://graph.org/{response['path']}"
-                )
-            except RetryAfterError:
-                self.flood_wait_count += 1
-                wait_time = 7
-                            
-                self.logger.info(
-                    f'Flood wait #{self.flood_wait_count} detected, ' 
-                    f'waiting {wait_time} seconds. ' 
-                    f'Total floods: {self.flood_wait_count}'
-                )
-                    
-                await asyncio.sleep(wait_time)
-                await self.telegraph.create_account(
-                    **TELEGRAPH_CREDS
-                )
-                continue
-            except Exception as e:
-                raise MangagraphError(f"Не удалось создать telegraph страницу: {str(e)}")
 
-    async def _construct_chapters_list(
-        self, 
-        title: str, 
-        chapters: List[Tuple[int, int, str, str, str]]
-    ) -> str:
-        """Creates a table of contents page in Telegraph."""
+        try:
+            response = await self._telegraph_request(
+                self.telegraph.create_page,
+                title=title,
+                html_content=html_content,
+                author_name='Generated by mangagraph',
+                author_url='https://github.com/damirTAG/mangagraph'
+            )
+        except MangagraphError:
+            raise
+        except Exception as e:
+            raise MangagraphError(f"Не удалось создать telegraph страницу: {str(e)}")
+
+        return (
+            f"https://telegra.ph/{response['path']}",
+            f"https://graph.org/{response['path']}"
+        )
+
+    def _build_toc_content(
+        self,
+        chapters: List[Tuple[str, str, str, str, str]]
+    ) -> List[Dict]:
         content = [
             {
                 "tag": "p",
                 "children": ["Создано Mangagraph, developer - ", {
-                    "tag": "a", 
-                    "attrs": {"href": "https://t.me/damirtag"}, 
+                    "tag": "a",
+                    "attrs": {"href": "https://t.me/damirtag"},
                     "children": ["@damirtag"]}
                 ]
             }
         ]
-        
+
         for volume, chapter_num, chapter_title, url, mirror_url in chapters:
             content.append({
                 "tag": "p",
@@ -251,21 +158,57 @@ class Mangagraph():
                 ]
             })
 
+        return content
+
+    async def _publish_toc(
+        self,
+        db_session: Session,
+        manga_name: str,
+        chapters: List[Tuple[str, str, str, str, str]],
+        existing_toc: Optional[TocURL]
+    ) -> Tuple[str, str]:
+        """Создает оглавление или обновляет существующее при повторном запуске."""
+        content = self._build_toc_content(chapters)
+
         try:
-            response = await self.telegraph.create_page(
-                title=title,
+            if existing_toc is not None and existing_toc.path:
+                await self._telegraph_request(
+                    self.telegraph.edit_page,
+                    path=existing_toc.path,
+                    title=manga_name,
+                    content=content
+                )
+                return existing_toc.url, existing_toc.mirror_url
+
+            response = await self._telegraph_request(
+                self.telegraph.create_page,
+                title=manga_name,
                 author_name='Damir',
                 author_url='https://github.com/damirtag/mangagraph',
                 content=content
             )
-            toc_url = response['url']
-            mirror_toc_url = toc_url.replace("telegra.ph", "graph.org")
-
-            return toc_url, mirror_toc_url
+        except MangagraphError:
+            raise
         except Exception as e:
             raise MangagraphError(f'Telegraph says: {str(e)}')
 
-    async def process_manga(self, manga_url: MangaLibUrl, db_name: str = None):
+        toc_url = response['url']
+        mirror_toc_url = toc_url.replace("telegra.ph", "graph.org")
+
+        db_session.add(TocURL(
+            manga_name=manga_name,
+            url=toc_url,
+            mirror_url=mirror_toc_url,
+            path=response['path'],
+            access_token=self.telegraph.get_access_token()
+        ))
+        db_session.commit()
+
+        return toc_url, mirror_toc_url
+
+    async def process_manga(
+        self, manga_url: str, db_name: Optional[str] = None
+    ) -> Optional[Tuple[str, str]]:
         """
         Параметры:
             manga_url (str): URL манги, которую нужно обработать.
@@ -273,7 +216,7 @@ class Mangagraph():
 
         Возвращает:
 
-            Кортеж из двух строк:
+            Кортеж из двух строк (либо None, если ни одна глава не обработана):
 
                 - URL оглавления в Telegraph.
 
@@ -284,76 +227,69 @@ class Mangagraph():
             InvalidURLException: Выбрасывается, если URL манги недействителен.
             RequestFailedException: Выбрасывается, если запрос к API завершается неудачей.
         """
-        await self.telegraph.create_account(
-            **TELEGRAPH_CREDS
-        )
         slug = extract_slug(manga_url)
-        
-        async with aiohttp.ClientSession() as session:
-            try:
-                manga_name  = await self._get_manga_name(session, slug)
-                chapters    = await self.get_chapters_info(session, slug)
-                if not chapters:
-                    self.logger.error(f"Похоже, главы в манге были удалены: https://mangalib.me/ru/{slug}")
-                    return
-                
-                db_session: Session  = self._setup_db(
-                    manga_name if not db_name else db_name
-                )
-                if db_session is None:
-                    raise RuntimeError("Не удалось создать сессию базы данных.")
-                
-                self.total_chapters = len(chapters)
-                self.processed_count = 0
-                processed_chapters = []
 
-                first_chapter = chapters[0]
-                pages = await self.get_chapter_pages(
-                    session,
-                    slug,
-                    first_chapter.get('volume'),
-                    first_chapter.get('number')
+        async with self.client:
+            manga_name  = await self.client.get_manga_name(slug)
+            chapters    = await self.client.get_chapters(slug)
+            if not chapters:
+                self.logger.error(f"Похоже, главы в манге были удалены: https://mangalib.me/ru/{slug}")
+                return None
+
+            db_session = self._setup_db(db_name or manga_name)
+            try:
+                # Продолжаем с тем же Telegraph-аккаунтом, чтобы можно было
+                # редактировать уже созданное оглавление, а не плодить новые
+                existing_toc: Optional[TocURL] = (
+                    db_session.query(TocURL).order_by(TocURL.id.desc()).first()
                 )
-                
+                if existing_toc is not None and existing_toc.access_token:
+                    self.telegraph = Telegraph(access_token=existing_toc.access_token)
+                else:
+                    await self._ensure_telegraph_account()
+
+                total_chapters = len(chapters)
+                processed_count = 0
+                processed_chapters = []
+                failed_chapters = []
+
                 for chapter_info in chapters:
-                    volume = chapter_info.get('volume')
-                    chapter_num = chapter_info.get('number')
+                    volume = normalize_chapter_number(chapter_info.get('volume'))
+                    chapter_num = normalize_chapter_number(chapter_info.get('number'))
                     title = (
-                        f"{manga_name} | {chapter_info.get('name', f'Том {volume}, Глава {chapter_num}')}" 
+                        f"{manga_name} | "
+                        f"{chapter_info.get('name') or f'Том {volume}, Глава {chapter_num}'}"
                     )
 
                     existing_chapter = db_session.query(Chapter).filter_by(
-                        volume=volume, 
+                        volume=volume,
                         chapter=chapter_num
                     ).first()
 
                     if existing_chapter:
-                        self.processed_count += 1
+                        processed_count += 1
                         processed_chapters.append(
                             (volume, chapter_num, title, existing_chapter.url, existing_chapter.mirror_url)
                         )
-                        remaining = self.total_chapters - self.processed_count
+                        remaining = total_chapters - processed_count
                         est_time = estimate_remaining_time(remaining)
                         self.logger.info(
-                            f"Глава {chapter_num} уже существует, пропускаем... " 
-                            f"[{self.processed_count}/{self.total_chapters}] " 
+                            f"Глава {chapter_num} уже существует, пропускаем... "
+                            f"[{processed_count}/{total_chapters}] "
                             f"Примерное время: {est_time}"
                         )
                         continue
 
                     try:
-                        pages = await self.get_chapter_pages(
-                            session,
-                            slug, 
-                            volume, 
-                            chapter_num
-                        )
-                        
+                        pages = await self.client.get_chapter_pages(slug, volume, chapter_num)
+                        if not pages:
+                            raise MangagraphError("Страницы главы не найдены")
+
                         url, mirror_url = await self._create_telegraph_page(
                             title=title,
                             image_urls=pages
                         )
-                        
+
                         new_chapter = Chapter(
                             volume=volume,
                             chapter=chapter_num,
@@ -363,179 +299,153 @@ class Mangagraph():
                         )
                         db_session.add(new_chapter)
                         db_session.commit()
-                        
-                        self.processed_count += 1
+
+                        processed_count += 1
                         processed_chapters.append((volume, chapter_num, title, url, mirror_url))
-                        
-                        remaining = self.total_chapters - self.processed_count
+
+                        remaining = total_chapters - processed_count
                         est_time = estimate_remaining_time(remaining)
                         self.logger.info(
-                            f"Обработана глава: {title} " 
-                            f"[{self.processed_count}/{self.total_chapters}] " 
+                            f"Обработана глава: {title} "
+                            f"[{processed_count}/{total_chapters}] "
                             f"Осталось: {est_time}"
                         )
-                        
+
                         await asyncio.sleep(3)
-                        
+
                     except Exception as e:
-                        self.logger.error(
-                            f"Ошибка обработки главы {chapter_num}: {str(e)}\n" 
-                            f"Всего обработано: {self.processed_count}/{self.total_chapters}"
-                        )
                         db_session.rollback()
-                        break
+                        failed_chapters.append(chapter_num)
+                        self.logger.error(
+                            f"Ошибка обработки главы {chapter_num}: {str(e)}\n"
+                            f"Всего обработано: {processed_count}/{total_chapters}"
+                        )
+                        continue
 
-                if processed_chapters:
-                    toc_url, mirror_toc_url = await self._construct_chapters_list(
-                        manga_name,
-                        processed_chapters
+                if failed_chapters:
+                    self.logger.warning(
+                        f"Не удалось обработать {len(failed_chapters)} глав: "
+                        f"{', '.join(failed_chapters)}. "
+                        f"Повторный запуск обработает только их."
                     )
-                    toc_db = TocURL(
-                        manga_name=manga_name,
-                        url=toc_url,
-                        mirror_url=mirror_toc_url
-                    )
-                    db_session.add(toc_db)
-                    db_session.commit()
 
-                    self.logger.info(f"Создано оглавление: {toc_url}")
-                    self.logger.info(f"Всего обработано: {self.processed_count}/{self.total_chapters}")
-                    self.logger.info(f"Зеркало: {mirror_toc_url}")
+                if not processed_chapters:
+                    return None
 
-                    return toc_url, mirror_toc_url
+                toc_url, mirror_toc_url = await self._publish_toc(
+                    db_session,
+                    manga_name,
+                    processed_chapters,
+                    existing_toc
+                )
 
-            except (KeyboardInterrupt, SystemExit):
-                self.logger.info('Sayonara!')
+                self.logger.info(f"Создано оглавление: {toc_url}")
+                self.logger.info(f"Всего обработано: {processed_count}/{total_chapters}")
+                self.logger.info(f"Зеркало: {mirror_toc_url}")
+
+                return toc_url, mirror_toc_url
 
             finally:
                 db_session.close()
 
-    async def process_chapter(
-        self, 
-        manga_url: MangaLibUrl, 
-        chapter_num: int
-    ) -> Tuple[str, str]:
-        """
-        Обработка одной главы.
-        
-        .. deprecated:: 0.0.4
-            Use :func:`process_chapters` instead. This method will be removed in future versions.
-        
-        Args:
-            manga_url: URL of the manga
-            chapter_num: Chapter number to process
-        
-        Returns:
-            Tuple of (telegraph_url, mirror_url) or None
-        """
-        import warnings
-        warnings.warn(
-            "process_chapter() is deprecated and will be removed in future versions. "
-            "Use process_chapters() instead.",
-            DeprecationWarning,
-            stacklevel=2
-        )
-        return await self.process_chapters(manga_url, chapter_num)
-
     async def process_chapters(
         self,
-        manga_url: MangaLibUrl,
-        chapter_nums: Union[int, List[int]],
+        manga_url: str,
+        chapter_nums: Union[ChapterNumber, List[ChapterNumber]],
         max_concurrent: int = 3
-    ) -> Union[Tuple[str, str], Dict[int, Tuple[str, str]]]:
+    ) -> Union[Optional[Tuple[str, str]], Dict[ChapterNumber, Optional[Tuple[str, str]]]]:
         """
         Обработка одной или несколько глав по ее номеру.
-        
+
         Args:
             manga_url: URL манги из MangaLib
-            chapter_nums: Номер одной главы (int) либо список глав в массиве
+            chapter_nums: Номер одной главы (int/float/str, например 10 или "10.5")
+                либо список глав
             max_concurrent: Maximum concurrent processing (default: 3)
-        
+
         Returns:
-            - Одна глава int: Tuple[str, str] - (telegraph_url, mirror_url) or None
-            - Список глав: Dict[int, Tuple[str, str]] - mapping chapter_num to URLs
-        
+            - Одна глава: Tuple[str, str] - (telegraph_url, mirror_url) or None
+            - Список глав: Dict[chapter_num, Tuple[str, str]] - mapping chapter_num to URLs
+
         Examples:
+        ```python
             # Одна глава
             url, mirror = await mg.process_chapters("https://mangalib.me/ru/manga/206--one-piece", 1050)
-            
+
             # Несколько глав
             results = await mg.process_chapters("https://mangalib.me/ru/manga/206--one-piece", [1050, 1051, 1052])
+        ```
         """
-        is_single = isinstance(chapter_nums, (int, float))
-        chapter_list = [chapter_nums] if is_single else chapter_nums
-        
-        if not chapter_list:
+        is_single = isinstance(chapter_nums, (int, float, str))
+        requested_chapters = [chapter_nums] if is_single else chapter_nums
+
+        if not requested_chapters:
             self.logger.error("No chapters provided")
             return None if is_single else {}
-        
-        await self.telegraph.create_account(**TELEGRAPH_CREDS)
-        
+
+        await self._ensure_telegraph_account()
+
         slug = extract_slug(manga_url)
         results = {}
-        manga_name_cache = {}
-        
-        async with aiohttp.ClientSession() as session:
+
+        async with self.client:
             try:
-                manga_name = await self._get_manga_name(session, slug)
-                manga_name_cache[slug] = manga_name
+                manga_name = await self.client.get_manga_name(slug)
             except Exception as e:
                 self.logger.error(f"Failed to get manga name: {e}")
                 return None if is_single else {}
-            
+
             sem = asyncio.Semaphore(max_concurrent)
-            
-            async def process_single_chapter(chapter_num: int):
+
+            async def process_single_chapter(chapter_num: ChapterNumber):
                 async with sem:
                     try:
-                        chapter_list = await self.get_chapters_info(session, slug, chapter_num)
-                        if not chapter_list:
+                        matches = await self.client.get_chapters(slug, chapter_num)
+                        if not matches:
                             self.logger.error(
                                 f"Глава №{chapter_num} не найдена, возможно удалена: "
                                 f"https://mangalib.me/ru/{slug}"
                             )
-                            return None
-                        
-                        chapter = chapter_list[0]
-                        pages = await self.get_chapter_pages(
-                            session,
-                            slug,
-                            chapter.get('volume'),
-                            chapter.get('number')
-                        )
-                        
+                            results[chapter_num] = None
+                            return
+
+                        chapter = matches[0]
+                        volume = chapter.get('volume')
+                        number = chapter.get('number')
+                        pages = await self.client.get_chapter_pages(slug, volume, number)
+
                         if not pages:
                             self.logger.error(f"Страниц для главы №{chapter_num} не найдено")
-                            return None
-                        
-                        volume = chapter.get('volume')
+                            results[chapter_num] = None
+                            return
+
                         title = (
                             f"{manga_name} | "
-                            f"{chapter.get('name', f'Том {volume}, Глава {chapter_num}')}"
+                            f"{chapter.get('name') or f'Том {volume}, Глава {number}'}"
                         )
-                        
+
                         url, mirror_url = await self._create_telegraph_page(
                             title=title,
                             image_urls=pages
                         )
-                        
+
                         self.logger.info(f"Обработана глава {chapter_num}: {title}")
                         results[chapter_num] = (url, mirror_url)
-                        
+
                         await asyncio.sleep(2)
-                        
+
                     except Exception as e:
                         self.logger.error(f"Error processing chapter {chapter_num}: {e}")
                         results[chapter_num] = None
-            
-            tasks = [process_single_chapter(num) for num in chapter_list]
-            await asyncio.gather(*tasks, return_exceptions=True)
-        
+
+            tasks = [process_single_chapter(num) for num in requested_chapters]
+            await asyncio.gather(*tasks)
+
         successful = sum(1 for v in results.values() if v is not None)
         self.logger.info(
-            f"Обработка завершена: {successful}/{len(chapter_list)} глав"
+            f"Обработка завершена: {successful}/{len(requested_chapters)} глав"
         )
-        
+
         if is_single:
-            return results.get(chapter_list[0])
+            return results.get(requested_chapters[0])
         return results

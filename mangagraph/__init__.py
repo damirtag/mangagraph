@@ -1,4 +1,5 @@
 from .parser        import Mangagraph
+from .client        import MangaLibClient
 from .models        import Chapter, TocURL
 from .schemas       import SearchData
 from .exceptions    import (
@@ -7,12 +8,16 @@ from .exceptions    import (
     RequestFailedException
 )
 
+__version__ = '0.2.0'
+
 __all__ = [
     'Mangagraph',
+    'MangaLibClient',
     'Chapter',
     'TocURL',
     'SearchData',
     'MangagraphError',
     'InvalidURLException',
-    'RequestFailedException'
+    'RequestFailedException',
+    '__version__'
 ]

@@ -1,9 +1,23 @@
-from mangagraph import Mangagraph
+import asyncio
+
+from mangagraph import Mangagraph, MangaLibClient
 from mangagraph.exceptions import MangagraphError
 
 async def main():
     try:
+        # Токен MangaLib (нужен для поиска) можно передать напрямую
+        # или через переменную окружения MANGALIB_TOKEN / файл .env
         mgraph = Mangagraph()
+
+        # Прямой доступ к API MangaLib — без Telegraph и БД
+        async with MangaLibClient() as client:
+            if client.has_token:
+                me = await client.me()
+                print(f"Авторизован как: {me.get('username')} (id={me.get('id')})")
+
+            chapters = await client.get_chapters('7965--chainsaw-man')
+            print(f"Глав у Бензочела: {len(chapters)}\n")
+
         # Поиск манги по ключевому слову и с лимитом
         results = await mgraph.search_manga("Berserk", limit=3)
 
@@ -14,13 +28,15 @@ async def main():
             print(f"   Ссылка: https://mangalib.me/ru/manga/{result.slug_url}")
             print()
 
-        # Парсинг одной конкретной главы
+        # Парсинг одной конкретной главы (поддерживаются и половинные: "97.5")
         chapter_num = 97
-        url, mirror_url = await mgraph.process_chapter(
+        result = await mgraph.process_chapters(
             'https://mangalib.me/ru/manga/7965--chainsaw-man',
             chapter_num
         )
-        print(f'Бензочел, глава номер {chapter_num}: {url} | {mirror_url}')
+        if result:
+            url, mirror_url = result
+            print(f'Бензочел, глава номер {chapter_num}: {url} | {mirror_url}')
 
         # Парсинг нескольких глав сразу
         results = await mgraph.process_chapters(
@@ -29,21 +45,25 @@ async def main():
         )
 
         print("Главы:\n")
-        for num, (toc, mirror) in results.items():
-            print(f"📖 Глава №{num}")
+        for num, links in results.items():
+            if links is None:
+                print(f"Глава №{num}: не обработана\n")
+                continue
+            toc, mirror = links
+            print(f"Глава №{num}")
             print(f"   TOC: {toc}")
             print(f"   Mirror: {mirror}\n")
 
-        # Парсинг манги и загрузка телеграф
-        toc_url, mirror_toc_url = await mgraph.process_manga('https://mangalib.me/ru/manga/706--onepunchman')
+        # Парсинг манги целиком и загрузка в телеграф
+        result = await mgraph.process_manga('https://mangalib.me/ru/manga/706--onepunchman')
 
-        print(f"Table of Contents: {toc_url}")
-        print(f"Mirror: {mirror_toc_url}")
+        if result:
+            toc_url, mirror_toc_url = result
+            print(f"Table of Contents: {toc_url}")
+            print(f"Mirror: {mirror_toc_url}")
     except MangagraphError as e:
         print(f"Parser error: {e}")
     except Exception as e:
         print(f"Unexpected error: {e}")
-
-import asyncio
 
 asyncio.run(main())
