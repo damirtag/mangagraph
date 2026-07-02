@@ -2,6 +2,11 @@
 
 #### From Mangalib to Telegraph with ❤️
 
+[![PyPI](https://img.shields.io/pypi/v/mangagraph?logo=pypi&logoColor=white&color=blue)](https://pypi.org/project/mangagraph/)
+[![Downloads](https://img.shields.io/pypi/dm/mangagraph?style=flat-square)](https://pypi.org/project/mangagraph/)
+[![CI/CD](https://github.com/damirtag/mangagraph/actions/workflows/python-publish.yml/badge.svg)](https://github.com/damirtag/mangagraph/actions/workflows/python-publish.yml)
+[![Telegram](https://img.shields.io/badge/Telegram-@damirtag-26A5E4?logo=telegram&logoColor=white)](https://t.me/damirtag)
+
 Асинхронный парсер-конвертер манги из mangalib api в telegraph
 
 ## Принцип работы
