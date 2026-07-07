@@ -1,23 +1,28 @@
-from .parser        import Mangagraph
+from .mangagraph    import Mangagraph
 from .client        import MangaLibClient
-from .models        import Chapter, TocURL
+from .telegraph     import TelegraphClient
+from .storage       import MangaStorage, ChapterRecord, TocRecord
 from .schemas       import SearchData
 from .exceptions    import (
     MangagraphError,
     InvalidURLException,
-    RequestFailedException
+    RequestFailedException,
+    TelegraphError
 )
 
-__version__ = '0.2.0.post1'
+__version__ = '0.3.0'
 
 __all__ = [
     'Mangagraph',
     'MangaLibClient',
-    'Chapter',
-    'TocURL',
+    'TelegraphClient',
+    'MangaStorage',
+    'ChapterRecord',
+    'TocRecord',
     'SearchData',
     'MangagraphError',
     'InvalidURLException',
     'RequestFailedException',
+    'TelegraphError',
     '__version__'
 ]

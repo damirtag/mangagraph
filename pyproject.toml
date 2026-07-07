@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mangagraph"
-version = "0.2.0.post1"
+version = "0.3.0"
 description = "Async manga parser-converter from mangalib to telegraph pages"
 readme = "readme.md"
 license = { text = "MIT" }
@@ -14,8 +14,6 @@ authors = [
 requires-python = ">=3.9"
 dependencies = [
     "aiohttp>=3.8.0",
-    "sqlalchemy>=1.4.0",
-    "telegraph[aio]>=2.2.0",
 ]
 keywords = [
     "mangalib",

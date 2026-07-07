@@ -12,3 +12,9 @@ class RequestFailedException(MangagraphError):
         self.url = url
         self.message = message
         super().__init__(f"{self.message} URL: {self.url}")
+
+class TelegraphError(MangagraphError):
+    def __init__(self, method, message):
+        self.method = method
+        self.message = message
+        super().__init__(f"Telegraph {method}: {message}")
