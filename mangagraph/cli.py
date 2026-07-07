@@ -5,7 +5,7 @@ import sys
 
 from typing         import List, Union
 
-from .parser        import Mangagraph
+from .mangagraph        import Mangagraph
 from .exceptions    import MangagraphError
 
 logger = logging.getLogger('mangagraph.cli')
