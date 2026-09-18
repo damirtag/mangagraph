@@ -4,8 +4,8 @@ from pathlib import Path
 
 MAX_CONCURRENT      = 3
 CHAPTERS_PER_MINUTE = 12
-BASE_IMG_URL        = "https://img2.imglib.info"
-API_BASE_URL        = "https://api2.mangalib.me/api/"
+BASE_IMG_URL        = "https://img3.cdnlibs.org"
+API_BASE_URL        = "https://api.cdnlibs.org/api/"
 TELEGRAPH_CREDS     = dict(
     short_name  ='Damir',
     author_name ='Создано mangagraph',
@@ -42,7 +42,13 @@ def get_headers(token: str = None) -> dict:
     или файла .env в текущей директории.
     Без токена запросы идут анонимно (поиск может быть недоступен).
     """
-    headers = {'User-Agent': DEFAULT_USER_AGENT}
+    headers = {
+        'User-Agent': DEFAULT_USER_AGENT,
+        'Site-Id': '1',
+        'Referer': 'https://mangalib.me/',
+        'Sec-ch-ua': '"Chromium";v="152", "Not?A_Brand";v="24", "Google Chrome";v="152"',
+        'Content-Type': 'application/json',
+        }
     if not token and TOKEN_ENV_VAR not in os.environ:
         _load_dotenv()
     token = token or os.environ.get(TOKEN_ENV_VAR)

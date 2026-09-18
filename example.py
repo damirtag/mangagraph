@@ -1,5 +1,5 @@
 import asyncio
-
+import os
 from mangagraph import Mangagraph, MangaLibClient
 from mangagraph.exceptions import MangagraphError
 
@@ -7,7 +7,8 @@ async def main():
     try:
         # Токен MangaLib (нужен для поиска) можно передать напрямую
         # или через переменную окружения MANGALIB_TOKEN / файл .env
-        mgraph = Mangagraph()
+        TOKEN = os.environ.get('MANGALIB_TOKEN')
+        mgraph = Mangagraph(TOKEN)
 
         # Прямой доступ к API MangaLib — без Telegraph и БД
         async with MangaLibClient() as client:
